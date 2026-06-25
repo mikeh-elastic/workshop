@@ -1,51 +1,112 @@
-version: "1"
+# =============================================================================
+# Workflow: IP Investigation — Agent + Human in the Loop (All Three Patterns)
+# =============================================================================
+#
+# Demonstrates all three HITL positions relative to an ai.agent step:
+#
+#   GATE 1 (before agent) — analyst approves whether to run the agent at all.
+#                           Use when you want human confirmation before spending
+#                           LLM tokens, or before taking any automated action.
+#
+#   ai.agent step         — agent investigates, reasons over enrichment, and
+#                           proposes a recommended_action with findings.
+#
+#   GATE 2 (after agent)  — analyst reviews the agent's findings and approves
+#                           (or redirects) before the workflow takes action.
+#                           This is the canonical HITL pattern.
+#
+# The workshop exercise is to run the workflow three ways:
+#   1. Skip gate 1 (set skip_pre_approval=true) — agent runs immediately
+#   2. Use gate 1 only — see how pre-approval changes the flow
+#   3. Use both gates — full double-gate high-confidence pattern
+#
+# SETUP:
+#   1. Import this workflow: Management → Workflows
+#   2. Update YOUR-* consts
+#   3. Create an Agent Builder agent named "netflow-ip-investigator"
+#      (or use your existing one) and copy its agent ID
+#   4. Update agent-id below with that ID
+#   5. Run manually with inputs: dest_ip, source_ip, context
+#
+# REQUIRED CONSTS:
+#   kibana_url        - your Kibana URL
+#   llm_connector_id  - LLM connector ID
+#
+# =============================================================================
+
+version: '1'
+
 name: IP Investigation — Agent + Human in the Loop
-description: |
-  Demonstrates all three HITL positions: a pre-approval gate before the agent runs, the ai.agent investigation step, and a post-approval gate before any action is taken. Designed as a workshop exercise showing how waitForInput integrates with ai.agent in both directions.
+
+description: >
+  Demonstrates all three HITL positions: a pre-approval gate before the agent
+  runs, the ai.agent investigation step, and a post-approval gate before any
+  action is taken. Designed as a workshop exercise showing how waitForInput
+  integrates with ai.agent in both directions.
+
 enabled: true
+
 tags:
   - netflow
   - hitl
   - agent
   - workshop
   - layer3
-consts:
-  kibana_url: https://YOUR-KIBANA-URL.elastic-cloud.com
-  llm_connector_id: YOUR-LLM-CONNECTOR-ID
+
 triggers:
   - type: manual
+
 inputs:
-  properties:
-    dest_ip:
-      type: string
-      description: Destination IP to investigate
-    source_ip:
-      type: string
-      description: Internal source IP (optional)
-      default: unknown
-    context:
-      type: string
-      description: Any background context for this investigation
-      default: Manual investigation request
-    skip_pre_approval:
-      type: string
-      description: Set to 'true' to skip Gate 1 and run the agent immediately
-      default: "false"
-    abuseipdb_score:
-      type: string
-      description: AbuseIPDB score from Stage 1 enrichment (0-100), if available
-      default: "0"
-    beacon_verdict:
-      type: string
-      description: Beaconing verdict from Stage 1 (high/medium/low/none), if available
-      default: none
-    greynoise_class:
-      type: string
-      description: GreyNoise classification from Stage 1, if available
-      default: unknown
-  required:
-    - dest_ip
+  - name: dest_ip
+    type: string
+    description: "Destination IP to investigate"
+    required: true
+
+  - name: source_ip
+    type: string
+    description: "Internal source IP (optional)"
+    required: false
+    default: "unknown"
+
+  - name: context
+    type: string
+    description: "Any background context for this investigation"
+    required: false
+    default: "Manual investigation request"
+
+  - name: skip_pre_approval
+    type: string
+    description: "Set to 'true' to skip Gate 1 and run the agent immediately"
+    required: false
+    default: "false"
+
+  - name: abuseipdb_score
+    type: string
+    description: "AbuseIPDB score from Stage 1 enrichment (0-100), if available"
+    required: false
+    default: "0"
+
+  - name: beacon_verdict
+    type: string
+    description: "Beaconing verdict from Stage 1 (high/medium/low/none), if available"
+    required: false
+    default: "none"
+
+  - name: greynoise_class
+    type: string
+    description: "GreyNoise classification from Stage 1, if available"
+    required: false
+    default: "unknown"
+
+consts:
+  kibana_url: "https://YOUR-KIBANA-URL.elastic-cloud.com"
+  llm_connector_id: "YOUR-LLM-CONNECTOR-ID"
+
 steps:
+
+  # =========================================================================
+  # STEP 1: Log what we received
+  # =========================================================================
   - name: log_start
     type: console
     with:
@@ -57,6 +118,7 @@ steps:
         AbuseIPDB score: {{ inputs.abuseipdb_score }}
         Beacon verdict: {{ inputs.beacon_verdict }}
         Skip pre-approval: {{ inputs.skip_pre_approval }}
+
   - name: review
     type: waitForInput
     with:
@@ -68,16 +130,24 @@ steps:
         properties:
           approved:
             type: boolean
-            title: Approve investigation?
+            title: "Approve investigation?"
           notes:
             type: string
-            title: Analyst notes
-        required:
-          - approved
+            title: "Analyst notes"
+        required: ["approved"]
+  # =========================================================================
+  # GATE 1 — Pre-approval (before the agent)
+  # Skipped when skip_pre_approval == 'true'
+  #
+  # Use case: high-risk IPs, production environments, or when building
+  # initial trust in the automated pipeline. Human decides whether the
+  # investigation is worth running before any LLM tokens are spent.
+  # =========================================================================
   - name: gate1_pre_approval
     type: if
     condition: "inputs.skip_pre_approval : 'false'"
     steps:
+
       - name: pre_approval_wait
         type: waitForInput
         with:
@@ -103,19 +173,20 @@ steps:
             properties:
               approved:
                 type: boolean
-                title: Run AI investigation
+                title: "Run AI investigation"
               priority:
                 type: string
-                title: Priority
+                title: "Priority"
                 enum:
-                  - standard
-                  - urgent
-                  - low
+                  - "standard"
+                  - "urgent"
+                  - "low"
               notes:
                 type: string
-                title: Analyst notes (optional)
+                title: "Analyst notes (optional)"
             required:
               - approved
+
       - name: log_gate1_decision
         type: console
         with:
@@ -123,6 +194,8 @@ steps:
             Gate 1 decision: approved={{ steps.pre_approval_wait.output.approved }}
             Priority: {{ steps.pre_approval_wait.output.priority | default: 'standard' }}
             Notes: {{ steps.pre_approval_wait.output.notes | default: '(none)' }}
+
+      # If Gate 1 rejected, create a brief case noting the decision and stop
       - name: handle_gate1_rejection
         type: if
         condition: "steps.pre_approval_wait.output.approved : false"
@@ -130,6 +203,8 @@ steps:
           - name: create_rejected_case
             type: cases.createCase
             with:
+              owner: securitySolution
+              title: "[Investigation Declined] {{ inputs.dest_ip }}"
               description: |
                 ## Investigation Declined at Gate 1
 
@@ -138,39 +213,30 @@ steps:
                 **Analyst notes:** {{ steps.pre_approval_wait.output.notes | default: '(none)' }}
 
                 No AI investigation was run. Case created for audit trail.
-              owner: securitySolution
               tags:
                 - netflow
                 - hitl
                 - gate1-declined
-              title: "[Investigation Declined] {{ inputs.dest_ip }}"
-            push-case: false
+
+  # =========================================================================
+  # AI AGENT STEP — only runs if:
+  #   - skip_pre_approval was 'true' (gate 1 skipped), OR
+  #   - gate 1 ran AND the analyst approved
+  #
+  # The `if` condition handles both cases.
+  # KQL syntax: : true matches boolean true, : 'false' matches string 'false'
+  # =========================================================================
   - name: run_agent_investigation
     type: if
-    condition: |
-      inputs.skip_pre_approval : 'true' OR steps.pre_approval_wait.output.approved : true
+    condition: >
+      inputs.skip_pre_approval : 'true'
+      OR steps.review.output.approved : true
     steps:
+
       - name: agent_investigate
         type: ai.agent
+        agent-id: "elastic-ai-agent"
         with:
-          schema:
-            type: object
-            properties:
-              verdict:
-                type: string
-              confidence:
-                type: string
-              key_findings:
-                type: array
-                items:
-                  type: string
-              recommended_action:
-                type: string
-              rationale:
-                type: string
-            required:
-              - verdict
-              - recommended_action
           message: |
             Investigate the following IP address and produce a structured analysis.
 
@@ -195,8 +261,25 @@ steps:
             - key findings (bullet list)
             - recommended_action (one of: block, monitor, escalate, close)
             - rationale for the recommended action
-        agent-id: YOUR-AGENT-BUILDER-AGENT-ID
-        connector-id: "{{ consts.llm_connector_id }}"
+          schema:
+            type: object
+            properties:
+              verdict:
+                type: string
+              confidence:
+                type: string
+              key_findings:
+                type: array
+                items:
+                  type: string
+              recommended_action:
+                type: string
+              rationale:
+                type: string
+            required:
+              - verdict
+              - recommended_action
+
       - name: capture_agent_output
         type: data.set
         with:
@@ -205,6 +288,7 @@ steps:
           recommended_action: "{{ steps.capture_agent_output.output.recommended_action | default: 'monitor' }}"
           rationale: "{{ steps.capture_agent_output.output.rationale | default: 'No rationale provided' }}"
           key_findings: "{{ steps.capture_agent_output.output.key_findings | join: ', ' | default: 'No findings returned' }}"
+
       - name: log_agent_output
         type: console
         with:
@@ -214,6 +298,14 @@ steps:
             Confidence: {{ steps.capture_agent_output.output.confidence }}
             Recommended action: {{ steps.capture_agent_output.output.recommended_action }}
             Rationale: {{ steps.capture_agent_output.output.rationale }}
+
+      # =========================================================================
+      # GATE 2 — Post-approval (after the agent)
+      # This is the canonical HITL pattern: AI does the work, human approves action.
+      #
+      # The agent's findings are presented in full. The analyst confirms,
+      # overrides, or redirects before the workflow takes any consequential action.
+      # =========================================================================
       - name: gate2_post_approval
         type: waitForInput
         with:
@@ -242,22 +334,23 @@ steps:
             properties:
               approved:
                 type: boolean
-                title: Accept agent recommendation
+                title: "Accept agent recommendation"
               override_action:
                 type: string
-                title: Override action (if not accepting recommendation)
+                title: "Override action (if not accepting recommendation)"
                 enum:
                   - ""
-                  - block
-                  - monitor
-                  - escalate
-                  - close
-                  - investigate_further
+                  - "block"
+                  - "monitor"
+                  - "escalate"
+                  - "close"
+                  - "investigate_further"
               analyst_notes:
                 type: string
-                title: Analyst notes
+                title: "Analyst notes"
             required:
               - approved
+
       - name: log_gate2_decision
         type: console
         with:
@@ -265,21 +358,31 @@ steps:
             Gate 2 decision: approved={{ steps.gate2_post_approval.output.approved }}
             Override: {{ steps.gate2_post_approval.output.override_action | default: 'none' }}
             Notes: {{ steps.gate2_post_approval.output.analyst_notes | default: '(none)' }}
+
+      # Determine final action: analyst-approved recommendation or override
+      # DISPATCH — switch directly on gate2 approval, then on the action.
+      # No intermediate data.set needed — keeps all refs in-scope.
+      # =========================================================================
       - name: dispatch_action
         type: switch
         expression: "{{ steps.gate2_post_approval.output.approved }}"
         cases:
+
+          # ---- Analyst accepted the agent recommendation ----
           - match: "true"
             steps:
               - name: dispatch_accepted
                 type: switch
                 expression: "{{ steps.capture_agent_output.output.recommended_action }}"
                 cases:
-                  - match: block
+
+                  - match: "block"
                     steps:
                       - name: create_block_case
                         type: cases.createCase
                         with:
+                          owner: securitySolution
+                          title: "[BLOCK APPROVED] {{ inputs.dest_ip }}"
                           description: |
                             ## Block Action Approved
 
@@ -291,18 +394,18 @@ steps:
                             **Agent findings:** {{ steps.capture_agent_output.output.key_findings }}
 
                             **Action required:** Add `{{ inputs.dest_ip }}` to blocklist manually per policy.
-                          owner: securitySolution
                           tags:
                             - netflow
                             - block-approved
                             - hitl
-                          title: "[BLOCK APPROVED] {{ inputs.dest_ip }}"
-                        push-case: false
-                  - match: escalate
+
+                  - match: "escalate"
                     steps:
                       - name: create_escalated_case
                         type: cases.createCase
                         with:
+                          owner: securitySolution
+                          title: "[ESCALATED] IP Investigation — {{ inputs.dest_ip }}"
                           description: |
                             ## Escalated — Agent Recommendation Accepted
 
@@ -313,18 +416,18 @@ steps:
 
                             **Agent findings:** {{ steps.capture_agent_output.output.key_findings }}
                             **Rationale:** {{ steps.capture_agent_output.output.rationale }}
-                          owner: securitySolution
                           tags:
                             - netflow
                             - escalated
                             - hitl
-                          title: "[ESCALATED] IP Investigation — {{ inputs.dest_ip }}"
-                        push-case: false
-                  - match: investigate_further
+
+                  - match: "investigate_further"
                     steps:
                       - name: create_followup_case
                         type: cases.createCase
                         with:
+                          owner: securitySolution
+                          title: "[FURTHER INVESTIGATION] {{ inputs.dest_ip }}"
                           description: |
                             ## Further Investigation Required
 
@@ -332,17 +435,17 @@ steps:
                             **Verdict:** {{ steps.capture_agent_output.output.verdict }}
                             **Action:** investigate_further (agent accepted)
                             **Analyst notes:** {{ steps.gate2_post_approval.output.analyst_notes | default: '(none)' }}
-                          owner: securitySolution
                           tags:
                             - netflow
                             - needs-investigation
                             - hitl
-                          title: "[FURTHER INVESTIGATION] {{ inputs.dest_ip }}"
-                        push-case: false
+
                 default:
                   - name: create_monitor_accepted_case
                     type: cases.createCase
                     with:
+                      owner: securitySolution
+                      title: "[MONITOR] {{ inputs.dest_ip }}"
                       description: |
                         ## Monitor — Agent Recommendation Accepted
 
@@ -352,23 +455,25 @@ steps:
                         **Analyst notes:** {{ steps.gate2_post_approval.output.analyst_notes | default: '(none)' }}
 
                         **Agent findings:** {{ steps.capture_agent_output.output.key_findings }}
-                      owner: securitySolution
                       tags:
                         - netflow
                         - hitl
                         - monitor
-                      title: "[MONITOR] {{ inputs.dest_ip }}"
-                    push-case: false
+
+        # ---- Analyst overrode the recommendation ----
         default:
           - name: dispatch_override
             type: switch
             expression: "{{ steps.gate2_post_approval.output.override_action | default: 'monitor' }}"
             cases:
-              - match: block
+
+              - match: "block"
                 steps:
                   - name: create_block_override_case
                     type: cases.createCase
                     with:
+                      owner: securitySolution
+                      title: "[BLOCK — ANALYST OVERRIDE] {{ inputs.dest_ip }}"
                       description: |
                         ## Block — Analyst Override
 
@@ -378,19 +483,19 @@ steps:
                         **Analyst notes:** {{ steps.gate2_post_approval.output.analyst_notes | default: '(none)' }}
 
                         **Action required:** Add `{{ inputs.dest_ip }}` to blocklist manually per policy.
-                      owner: securitySolution
                       tags:
                         - netflow
                         - block-approved
                         - analyst-override
                         - hitl
-                      title: "[BLOCK — ANALYST OVERRIDE] {{ inputs.dest_ip }}"
-                    push-case: false
-              - match: escalate
+
+              - match: "escalate"
                 steps:
                   - name: create_escalated_override_case
                     type: cases.createCase
                     with:
+                      owner: securitySolution
+                      title: "[ESCALATED — ANALYST OVERRIDE] {{ inputs.dest_ip }}"
                       description: |
                         ## Escalated — Analyst Override
 
@@ -398,19 +503,19 @@ steps:
                         **Agent recommended:** {{ steps.capture_agent_output.output.recommended_action }}
                         **Override:** escalate
                         **Analyst notes:** {{ steps.gate2_post_approval.output.analyst_notes | default: '(none)' }}
-                      owner: securitySolution
                       tags:
                         - netflow
                         - escalated
                         - analyst-override
                         - hitl
-                      title: "[ESCALATED — ANALYST OVERRIDE] {{ inputs.dest_ip }}"
-                    push-case: false
-              - match: investigate_further
+
+              - match: "investigate_further"
                 steps:
                   - name: create_followup_override_case
                     type: cases.createCase
                     with:
+                      owner: securitySolution
+                      title: "[FURTHER INVESTIGATION — OVERRIDE] {{ inputs.dest_ip }}"
                       description: |
                         ## Further Investigation Required — Analyst Override
 
@@ -418,18 +523,18 @@ steps:
                         **Agent recommended:** {{ steps.capture_agent_output.output.recommended_action }}
                         **Override:** investigate_further
                         **Analyst notes:** {{ steps.gate2_post_approval.output.analyst_notes | default: '(none)' }}
-                      owner: securitySolution
                       tags:
                         - netflow
                         - needs-investigation
                         - analyst-override
                         - hitl
-                      title: "[FURTHER INVESTIGATION — OVERRIDE] {{ inputs.dest_ip }}"
-                    push-case: false
+
             default:
               - name: create_monitor_override_case
                 type: cases.createCase
                 with:
+                  owner: securitySolution
+                  title: "[MONITOR — ANALYST OVERRIDE] {{ inputs.dest_ip }}"
                   description: |
                     ## Monitor — Analyst Override
 
@@ -437,13 +542,14 @@ steps:
                     **Agent recommended:** {{ steps.capture_agent_output.output.recommended_action }}
                     **Override:** {{ steps.gate2_post_approval.output.override_action | default: 'monitor' }}
                     **Analyst notes:** {{ steps.gate2_post_approval.output.analyst_notes | default: '(none)' }}
-                  owner: securitySolution
                   tags:
                     - netflow
                     - hitl
                     - analyst-override
-                  title: "[MONITOR — ANALYST OVERRIDE] {{ inputs.dest_ip }}"
-                push-case: false
+
+  # =========================================================================
+  # FINAL LOG
+  # =========================================================================
   - name: log_complete
     type: console
     with:
