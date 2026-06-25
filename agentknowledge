@@ -1,0 +1,840 @@
+FCCX-15 Flaming Cupcake Challenge — Network Topology Reference
+For use as a RAG knowledge source in the IP investigation agent.
+When an internal IP address appears in an alert, query this document
+to enrich it with host identity, role, OS, and threat context.
+
+How to use this document
+When you receive an internal (RFC1918) IP address to investigate:
+Match the IP against the subnet ranges below to identify the network segment
+If the IP matches a specific host entry, return that host's identity and role
+Use the threat context notes to frame your analysis appropriately
+Cross-reference observer.name (sensor ID) with the sensor coverage section
+
+Network zones overview
+Zone
+CIDR
+Description
+Threat relevance
+SOC / Div0 management
+10.0.0.0/16
+Defender tools, monitoring infrastructure
+High-value target; SCOM/SCCM here
+SOC DMZ
+10.0.20.0/24
+Externally-facing services
+Web/DNS servers
+SOC internal
+10.0.30.0/24
+Internal SOC routing
+
+
+SOC services
+10.0.40.0/24
+Core defender tooling
+SIEM, IDS, SiLK, Nagios
+SOC management clients
+10.0.50.0/24
+Management workstations AND red team Kali
+⚠️ Kali at .31-.35
+SOC analysis
+10.0.200.0/24
+Malware analysis systems
+Forensic clients
+Div1 defended network
+192.168.0.0/16
+The team being defended
+All subnets below
+Div1 external-facing
+192.168.10.0/24
+Div1 perimeter
+Firewall, external IDS
+Div1 DMZ
+192.168.20.0/24
+Div1 DMZ services
+Web/DNS servers
+Div1 internal
+192.168.30.0/24
+Div1 internal routing
+Internal IDS
+Div1 services
+192.168.40.0/24
+Core Div1 infrastructure
+DC, file servers, intranet
+Div1 management
+192.168.50.0/24
+Div1 management subnet
+
+
+Div1 internal 2
+192.168.60.0/24
+Secondary internal routing
+
+
+Div1 user subnet 1
+192.168.110.0/24
+General users
+Mixed OS, varied patching
+Div1 HQ
+192.168.111.0/24
+Finance / Division HQ users
+High-value data
+Div1 user subnet 2
+192.168.120.0/24
+General users
+
+
+Div1 logistics 1
+192.168.121.0/24
+Logistics users battalion 1
+
+
+Div1 logistics 2
+192.168.122.0/24
+Logistics users battalion 2
+
+
+Div1 logistics 3
+192.168.123.0/24
+Logistics users battalion 3
+
+
+Div1 logistics 4
+192.168.124.0/24
+Logistics users battalion 4
+
+
+Div1 fail 1
+192.168.130.0/24
+Failover segment
+
+
+Div1 ops 1
+192.168.141.0/24
+Operations users battalion 1
+
+
+Div1 ops 2
+192.168.142.0/24
+Operations users battalion 2
+
+
+Div1 ops 3
+192.168.143.0/24
+Operations users battalion 3
+
+
+Div1 fail 2
+192.168.150.0/24
+Failover segment
+
+
+Div1 user subnet 3
+192.168.160.0/24
+Marketing HQ users
+
+
+Div1 intel 1
+192.168.161.0/24
+Intelligence users battalion 1
+High-value — intel data
+Div1 intel 2
+192.168.162.0/24
+Intelligence users battalion 2
+High-value — intel data
+Div1 intel 3
+192.168.163.0/24
+Intelligence users battalion 3
+High-value — intel data
+Div1 marketing
+192.168.164.0/24
+Marketing users
+
+
+Div1 DIV users
+192.168.165.0/24
+Division-level users
+
+
+Div1 medical
+192.168.166.0/24
+Medical users
+Sensitive data
+Div1 fail 3
+192.168.170.0/24
+Failover segment
+
+
+Div1 VPN pool
+192.168.181.0/24
+VPN client addresses
+Remote users
+Backbone
+204.34.0.0/24
+Network backbone
+Transit only
+Backbone core services
+204.34.156.0/24
+Backbone infrastructure
+
+
+Comcast ISP segment
+67.215.0.0/24
+Simulated ISP / internet-facing services
+NTP, DNS, Exchange here
+Theatre / management
+155.6.0.0/16
+External management + ⚠️ RED TEAM
+See red team section
+ACOIC / external
+143.84.150.0/24
+External intel reporting
+⚠️ Kali at .200-.220
+NEDC external
+142.59.0.0/28
+External segment
+
+
+ATT ISP simulation
+12.0.0.0/8
+Simulated ATT network
+Transit
+L3 ISP simulation
+4.0.0.0/8
+Simulated L3 network
+Transit + external service mirrors
+Exercise control
+123.0.0.0/20
+Exercise controllers
+Not player traffic
+
+
+⚠️ Red team and attacker infrastructure
+Any traffic TO or FROM these ranges from Div1 (192.168.x.x) hosts is a definitive compromise indicator — implant callback or C2 channel.
+Range
+Description
+10.0.50.31–35
+Red team Kali Linux (internal) — can reach Div1 directly
+155.6.6.10–12
+Red team Kali Linux (external theatre)
+143.84.50.200–220
+Red team Kali Linux (ACOIC external)
+155.6.0.0/16
+Full theatre/external range — includes red team and CSIRT
+45.6.0.0/16
+2nd CSIRT external range
+170.6.0.0/16
+4th CSIRT external range
+150.6.0.0/16
+5th CSIRT external range
+200.6.0.0/16
+6th CSIRT external range
+100.6.0.0/16
+DEV range
+
+
+Specific host inventory
+SOC / Div0 services subnet (10.0.40.0/24)
+IP
+Hostname
+OS
+Role
+Notes
+10.0.40.20
+Div0.DC / SOCA1202UN1
+Win2K8 R2
+Active Directory / DNS domain controller
+team.Corporate.Co domain
+10.0.40.21
+Div0.HIPS / HIPSC301UN00001
+Win2K3
+ePolicy Orchestrator (McAfee HIPS)
+Endpoint security management
+10.0.40.22
+Div0.SC / SOCXA101UN0001
+CentOS
+Security Center (Tenable)
+Vulnerability management
+10.0.40.23
+Div0.ESM / SOCDMAE01UN01
+RedHat
+ArcSight ESM
+Primary SIEM
+10.0.40.24
+Div0.LOGGER / SOCDMAL02UN01
+RedHat
+ArcSight Logger
+Log aggregation
+10.0.40.25
+Div0.FILE / SOCA702UN01
+Win2K8 R2
+File server (not domain-joined)
+Standalone file store
+10.0.40.26
+Div0.SHARE / SOCMS01UN01
+Win2K8 R2
+SharePoint server
+Intranet SharePoint
+10.0.40.27
+Div0.NAGIOS / SOCNM02UN0001
+CentOS
+Nagios network monitoring
+Polls agents via TCP 5667/12489
+10.0.40.28
+Div0.NESSUS / donna
+CentOS
+Nessus vulnerability scanner
+Scanning host — may trigger scan rules
+10.0.40.32
+Div0.SS1 / SOCNM02UN0004
+RedHat
+Primary Spectroserver (CA Spectrum)
+Network management
+10.0.40.33
+Div0.SS2 / SOCNM02UN0005
+RedHat
+Secondary Spectroserver
+Network management
+10.0.40.34
+Div0.OC1 / SOCNM02UN0006
+RedHat
+Primary OneClick (CA Spectrum UI)
+
+
+10.0.40.35
+Div0.OC2 / SOCNM02UN0007
+RedHat
+Secondary OneClick
+
+
+10.0.40.50
+Div0.SCCM / SOCNM02UN08
+Win2K8 R2
+SCCM primary site server
+Software deployment — port 8530/8531
+10.0.40.51
+Div0.ROLE / SOCNM02UN09
+Win2K8 R2
+SCCM role server
+
+
+10.0.40.52
+Div0.SCOM-DB / SOCNM02UN10
+Win2K8 R2
+SCOM database server
+⚠️ Port 5723 — SCOM management traffic
+10.0.40.53
+Div0.SCOM-MS1 / SOCNM02UN11
+Win2K8 R2
+SCOM root management server
+⚠️ Port 5723 — SCOM management traffic
+10.0.40.54
+Div0.SCOM-MS2 / SOCNM02UN12
+Win2K8 R2
+SCOM management server 2
+⚠️ Port 5723 — SCOM management traffic
+10.0.40.57
+Div0.RUCKSACK / SOCTICUN00001
+—
+Rucksack (threat intel platform)
+TI management
+10.0.40.61
+Div0.SFEXT (mgmt)
+—
+Sourcefire external IDS management
+Sensor: 10.0.10.50
+10.0.40.62
+Div0.SFINT (mgmt)
+—
+Sourcefire internal IDS management
+Sensor: 10.0.30.50
+10.0.40.63
+Div1.SFEXT (mgmt)
+—
+Div1 Sourcefire external IDS mgmt
+Sensor: 192.168.10.50
+10.0.40.64
+Div1.SFINT (mgmt)
+—
+Div1 Sourcefire internal IDS mgmt
+Sensor: 192.168.30.50
+10.0.40.65
+Div0.SFSVR / SOCSFSVR
+SourceFire
+Sourcefire Defense Center
+Central IDS management
+10.0.40.74
+Div0.SILKCOL / SOCNM02UN74
+—
+SiLK flow collector
+Flow collection for analysis
+10.0.40.75
+Div0.SILKANALYSIS / SOCNM02UN75
+—
+SiLK analysis workstation
+Flow analysis
+10.0.40.83
+Div0.BCDIR / SOCXP02UN00002
+—
+BlueCoat Reporter / Director
+Web proxy reporting
+10.0.40.91
+Div0.FW / SOCB601UN00001
+Palo Alto
+Div0 perimeter firewall
+PAN-OS
+10.0.40.92
+Div1.FW / DIVB601UN00001
+Palo Alto
+Div1 perimeter firewall
+PAN-OS
+10.0.40.93
+Div0.PANORAMA / SOCPAN01UN01
+PanOS
+Palo Alto Panorama management
+Centralised firewall management
+
+SOC DMZ (10.0.20.0/24)
+IP
+Hostname
+OS
+Role
+Notes
+10.0.20.58
+Div0.DNS / SOCA602UN00001
+CentOS
+DMZ DNS server
+
+
+10.0.20.59
+Div0.WEB / SOCC202UN00001
+Win2K8 R2
+Web server
+UGM installed
+
+SOC management (10.0.50.0/24)
+IP
+Hostname
+OS
+Role
+Notes
+10.0.50.11–25
+Div0.MGMT 1-15 / SOCMG02UN0001-15
+Win7 AGM
+SOC management workstations
+
+
+10.0.50.31–35
+Div0.KALI 1-5 / SOCKALI0001-5
+Kali Linux
+⚠️ RED TEAM — internal Kali attack boxes
+Can reach Div1 directly; source of east-west scans
+
+SOC analysis (10.0.200.0/24)
+IP
+Hostname
+OS
+Role
+Notes
+10.0.200.201–202
+Div0.FOR-CLIENT1-2
+Windows 7
+Forensic analysis clients
+
+
+10.0.200.203
+Div0.WIN-MALWARE / SOCXPMAL
+Windows XP
+Windows malware analysis
+XP — no patches
+10.0.200.204
+Div0.LINUX-MALWARE / SOCLINMAL
+REMnux
+Linux malware analysis
+
+
+10.0.200.205–206
+Div0.SIFT1-2 / SOCSIFT1-2
+SANS SIFT
+Digital forensics workstations
+
+
+
+Div1 services subnet (192.168.40.0/24) — primary target zone
+IP
+Hostname
+OS
+Role
+Notes
+192.168.40.20
+Div1.DC / DIVA1202UN01
+Win2K8 R2
+Active Directory / DNS domain controller
+team.Corporate.Co domain; UGM installed
+192.168.40.24
+Div1.LOGGER / DIVDMAL02UN01
+RedHat
+ArcSight Logger
+
+
+192.168.40.25
+Div1.FILE / DIVA702UN01
+Win2K8 R2
+File server
+UGM installed
+192.168.40.26
+Div1.SHARE / DIVMS01UN01
+Win2K3
+SharePoint 2003 server
+⚠️ Win2K3 — end of life, unpatched
+192.168.40.27
+Div1.NAGIOS / DIVNM02UN0001
+CentOS
+Nagios monitoring
+Polls agents — periodic flows expected
+192.168.40.28
+Div1.NESSUS / donna
+CentOS
+Nessus vulnerability scanner
+Scanning host
+192.168.40.29
+Div1.PKTCAP / DIVNM03UN0001
+—
+OpenFPC / NetScout packet capture
+
+
+192.168.40.50
+Div1.SCCM / DIVNM02UN08
+Win2K8 R2
+SCCM primary site server
+Software deployment
+192.168.40.51
+Div1.ROLE / DIVNM02UN09
+Win2K8 R2
+SCCM role server
+
+
+192.168.40.58
+Div1.INTRANET / DIVWEBUN00001
+Win2K3
+⚠️ Intranet web server running XAMPP v1.8
+CRITICAL — Win2K3 + XAMPP = highly vulnerable; known attack target
+192.168.40.91
+Div1.SONIONSVR / DIVDMSN02UN03
+Security Onion
+Centralised IDS server
+
+
+192.168.40.92
+Div1.SONION1 / DIVDMSN02UN04
+Security Onion
+IDS sensor 1
+
+
+192.168.40.93
+Div1.SONION2 / DIVDMSN02UN05
+Security Onion
+IDS sensor 2
+
+
+
+Div1 DMZ (192.168.20.0/24)
+IP
+Hostname
+OS
+Role
+Notes
+192.168.20.58
+Div1.DNS / DIVA602UN00001
+CentOS
+DNS server
+
+
+192.168.20.59
+Div1.WEB / DIVC202UN00001
+Win2K8 R2
+Web server
+UGM installed
+
+Div1 management (192.168.50.0/24)
+IP
+Hostname
+OS
+Role
+Notes
+192.168.50.11–12
+Div1.MGMT 1-2 / DIVMG02UN0001-2
+Win7 AGM
+Div1 management workstations
+
+
+
+Comcast ISP segment (67.215.0.0/24) — simulated ISP services
+IP
+Hostname
+OS
+Role
+Notes
+67.215.0.4
+Comcast.DNS / ComcastDNS
+Win2K8 R2
+ISP DNS server
+
+
+67.215.0.5
+Comcast.DC / SCA1202UN0001
+Win2K8 R2
+Domain controller
+
+
+67.215.0.8
+Comcast.EXCH / SCA1210UN0001
+Win2K8 R2
+Exchange mail server
+
+
+67.215.0.9
+Comcast.NTP / ComcastNTP
+CentOS
+⚠️ NTP server — monlist abuse documented
+Known NTP anomaly source in dataset
+67.215.0.10
+Comcast.KMS
+Win2K8 R2
+KMS license server
+
+
+67.215.0.45
+Comcast.NAGIOS / ComcastNAGIOS
+CentOS
+Nagios monitoring
+
+
+67.215.0.50
+Comcast.EMS
+Win2K8 R2
+EMS server
+
+
+67.215.0.55
+Comcast.WSUS
+Win2K8 R2
+Windows update server
+
+
+67.215.0.101
+Comcast.MGMT / ComcastMGMT0001
+Win7
+Management workstation
+
+
+67.215.0.201–210
+Comcast.USER 1-10
+Win7
+ISP user workstations
+
+
+
+Gateways and routers
+IP
+Role
+Notes
+10.0.1.101
+Theatre gateway (Div0.GW)
+Blackbox Cisco
+10.0.1.201
+Internal gateway (Div0.INT)
+Cisco ADRP
+10.0.10.254
+SOC external gateway
+
+
+10.0.30.1
+SOC internal gateway
+
+
+10.0.30.254
+SOC internal gateway
+
+
+10.0.40.1
+SOC services gateway
+
+
+10.0.10.50
+Div0.SFEXT / SOCDMSN02UN01
+Sourcefire external IDS sensor
+10.0.30.50
+Div0.SFINT / SOCDMSN02UN02
+Sourcefire internal IDS sensor
+155.6.2.254
+External gateway (Div0.EXT)
+Cisco
+155.6.3.254
+Div network gateway
+
+
+155.6.6.254
+Management gateway
+
+
+192.168.10.254
+Div1 external gateway (Div1.EXT)
+Cisco
+192.168.10.50
+Div1.SFEXT / DIVDMSN02UN01
+Sourcefire external IDS sensor
+192.168.30.1
+Div1 internal gateway 1 (Div1.INT1)
+Cisco ADRP
+192.168.30.50
+Div1.SFINT / DIVDMSN02UN02
+Sourcefire internal IDS sensor
+192.168.30.254
+Div1 internal gateway
+
+
+192.168.111.1
+Div1 Finance/HQ router
+
+
+192.168.121.1
+Div1 logistics 1 gateway
+
+
+192.168.140.254
+Internal gateway 2 (Div1.INT2)
+Cisco ADRP
+192.168.141.254
+Div1 ops 1 gateway
+
+
+192.168.142.254
+Div1 ops 2 gateway
+
+
+192.168.143.254
+Div1 ops 3 gateway
+
+
+192.168.161.1
+Div1 intel 1 gateway
+
+
+192.168.162.1
+Div1 intel 2 gateway
+
+
+192.168.163.1
+Div1 intel 3 gateway
+
+
+192.168.165.254
+Div1 DIV users gateway
+
+
+192.168.166.1
+Div1 medical gateway
+
+
+192.168.170.1
+Div1 fail 3 gateway
+
+
+
+Web proxy
+IP
+Hostname
+OS
+Role
+Notes
+192.168.70.10
+Div1.PROXY / DIVPX02UN00001
+Blue Coat
+Web proxy
+All Div1 web traffic proxied through here
+155.6.10.10
+Div1.PROXY (external) / Blue Coat
+Blue Coat
+External-facing proxy
+
+
+
+
+User subnet profile
+All Div1 user subnets (192.168.110–170.x) share this profile:
+Mix: 6 × Windows 7, 1 × non-Microsoft Windows 7, 1 × Windows XP, 1 × Windows Vista, 1 × Linux
+Patch level: varied — some systems intentionally unsupported and unpatched
+Linux kernel: all Linux hosts ≤ 3.13 (intentionally vulnerable)
+Scale: 10 users per subnet, .1 = gateway, .2-.10 = users typically
+High-value subnets: Intel (161-163), Finance/HQ (111), Medical (166)
+
+Sensor / collector mapping
+The observer.name field in flow records identifies which sensor collected the flow. The labels.observation_domain_id field is the numeric collector ID.
+Sensor name
+Location
+Covers
+C1
+Backbone IAP1 (12.0.0.60 / 204.34.0.54)
+ATT-side traffic
+C2
+Backbone IAP2 (12.0.0.35 / 204.34.0.62)
+ATT-side traffic
+C3
+Backbone IAP3 (4.0.0.60 / 204.34.0.38)
+L3-side traffic
+C4
+Backbone IAP4 (4.0.0.35 / 204.34.0.46)
+L3-side traffic
+
+Note: Internal east-west traffic (10.x ↔ 192.168.x) may not appear in backbone sensors — it depends on whether it crosses an IAP tap point. Flows visible on a single sensor only are likely internal to that network segment.
+
+SCOM port reference
+Port 5723 (TCP) is exclusively used by Microsoft System Center Operations Manager (SCOM). Legitimate sources/destinations: 10.0.40.52, 10.0.40.53, 10.0.40.54 only. Any 5723/5724 traffic NOT involving these three IPs is anomalous and indicates either attacker abuse or a rogue SCOM agent.
+
+Known attack patterns documented in this dataset
+The CERT/SEI SiLK Analyst Handbook uses this dataset as its primary case study and documents the following adversary behaviors as found:
+Pattern
+Handbook section
+What to look for
+Anomalous NTP
+6.1.3
+Large response bytes from 67.215.0.9; monlist response > 468 bytes
+Suspicious TCP behavior
+7.2
+Illegitimate TCP flag combinations; SYN-only sweeps
+ICMP information exposure
+7.3
+Internal non-gateway hosts sending ICMP outside their subnetwork
+Port knocking
+8.2.2
+3-8 port sequence to same host, zero response, < 120 seconds
+Abnormal web traffic
+4.3.4, 6.3.3
+Anomalous HTTP/HTTPS patterns; possible C2 over web
+
+
+Quick lookup: "what subnet is this IP in?"
+Given an IP address, determine its context:
+10.0.40.20–99: SOC core services — defender infrastructure
+10.0.40.52–54: SCOM servers — ⚠️ port 5723 is expected here ONLY
+10.0.50.31–35: ⚠️ Red team Kali Linux (internal attacker boxes)
+10.0.200.x: Malware analysis lab — isolated
+192.168.10.x: Div1 external perimeter
+192.168.20.x: Div1 DMZ
+192.168.30.x: Div1 internal routing
+192.168.40.x: Div1 core services — highest-value target zone
+192.168.40.58: ⚠️ CRITICAL — Win2K3 + XAMPP v1.8, known vulnerable intranet
+192.168.50.x: Div1 management
+192.168.60.x: Div1 secondary internal
+192.168.110–170.x: Div1 user subnets — mixed/legacy patch levels
+192.168.111.x: Finance / Division HQ — sensitive data
+192.168.161–163.x: Intelligence subnets — highest data sensitivity
+192.168.166.x: Medical — sensitive data
+67.215.0.x: Simulated Comcast ISP services
+67.215.0.9: ⚠️ NTP server — known anomalous NTP source
+155.6.x.x: Theatre / external — includes ⚠️ red team infrastructure
+143.84.50.200–220: ⚠️ Red team Kali (external)
+204.34.x.x: Backbone transit
+4.0.0.x / 12.0.0.x: Simulated ISP networks (L3 / ATT)
+123.0.0.x: Exercise controllers — not player traffic
+
