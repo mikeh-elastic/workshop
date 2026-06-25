@@ -1,0 +1,449 @@
+version: "1"
+name: Netflow IP Investigation - Stage 1 Enrichment
+description: |
+  Processes alerts from netflow detection rules. Iterates over each alert, skips external TI for RFC1918 addresses, queries AbuseIPDB/GreyNoise/ VirusTotal/Shodan/IPInfo for public IPs, runs ES|QL beaconing and flow analysis, then creates a Kibana security case.
+enabled: true
+tags:
+  - netflow
+  - threat-intel
+  - ip-investigation
+  - enrichment
+  - security
+consts:
+  kibana_url: https://YOUR-KIBANA-URL.elastic-cloud.com
+  kibana_auth: ApiKey YOUR-API-KEY-HERE
+  abuseipdb_api_key: YOUR-ABUSEIPDB-KEY
+  greynoise_api_key: YOUR-GREYNOISE-KEY
+  virustotal_api_key: e357e19bac56fa5ff6cc4e4fbd6b72243f46aa41d9f0c9eddbca95717c43817e
+  shodan_api_key: YOUR-SHODAN-KEY
+  ipinfo_token: YOUR-IPINFO-TOKEN
+  slack_webhook: https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK
+  stage2_workflow_id: netflow-ip-investigation-stage-2-ai-dossier
+triggers:
+  - type: alert
+steps:
+  - name: log_trigger
+    type: console
+    with:
+      message: |
+        Netflow IP Investigation triggered by rule: {{ event.rule.name }}
+        Alerts in this batch: {{ event.alerts | size }}
+  - name: process_each_alert
+    type: foreach
+    foreach: ${{ event.alerts }}
+    steps:
+      - name: extract_alert_fields
+        type: data.set
+        with:
+          alert_id: "{{ foreach.item._id }}"
+          dest_ip: "{{ foreach.item.destination.ip | default: 'unknown' }}"
+          source_ip: "{{ foreach.item.source.ip | default: 'unknown' }}"
+          alert_severity: "{{ foreach.item.kibana.alert.severity | default: 'medium' }}"
+          risk_score: "{{ foreach.item.kibana.alert.risk_score | default: '0' }}"
+          rule_name: "{{ event.rule.name }}"
+          alert_reason: "{{ foreach.item.alert_reason | default: '' }}"
+          beacon_score: "{{ foreach.item.beacon_score | default: '' }}"
+          flow_count: "{{ foreach.item.flow_count | default: '0' }}"
+      - name: log_alert
+        type: console
+        with:
+          message: |
+            Alert {{ foreach.index | plus: 1 }}/{{ foreach.total }}
+            ID:        {{ steps.extract_alert_fields.output.alert_id }}
+            Dest IP:   {{ steps.extract_alert_fields.output.dest_ip }}
+            Source IP: {{ steps.extract_alert_fields.output.source_ip }}
+            Severity:  {{ steps.extract_alert_fields.output.alert_severity }}
+            Reason:    {{ steps.extract_alert_fields.output.alert_reason }}
+      - name: classify_ip_scope
+        type: elasticsearch.esql.query
+        with:
+          query: |
+            ROW ip = "{{ steps.extract_alert_fields.output.dest_ip }}"
+            | EVAL ip_typed = TO_IP(ip)
+            | EVAL is_private = CIDR_MATCH(ip_typed,
+                "10.0.0.0/8",
+                "172.16.0.0/12",
+                "192.168.0.0/16",
+                "127.0.0.0/8",
+                "169.254.0.0/16",
+                "::1/128",
+                "fe80::/10"
+              )
+            | KEEP is_private
+          format: json
+        on-failure:
+          continue: true
+      - name: check_if_public_ip
+        type: if
+        condition: "steps.classify_ip_scope.output.values[0][0] : 1"
+        steps:
+          - name: check_abuseipdb
+            type: http
+            with:
+              url: https://api.abuseipdb.com/api/v2/check?ipAddress={{ steps.extract_alert_fields.output.dest_ip }}&maxAgeInDays=90&verbose=true
+              method: GET
+              headers:
+                Key: "{{ consts.abuseipdb_api_key }}"
+                Accept: application/json
+            on-failure:
+              continue: true
+          - name: check_greynoise
+            type: http
+            with:
+              url: https://api.greynoise.io/v3/community/{{ steps.extract_alert_fields.output.dest_ip }}
+              method: GET
+              headers:
+                key: "{{ consts.greynoise_api_key }}"
+                Accept: application/json
+            on-failure:
+              continue: true
+          - name: check_virustotal
+            type: http
+            with:
+              url: https://www.virustotal.com/api/v3/ip_addresses/{{ steps.extract_alert_fields.output.dest_ip }}
+              method: GET
+              headers:
+                x-apikey: "{{ consts.virustotal_api_key }}"
+                Accept: application/json
+            on-failure:
+              continue: true
+          - name: check_shodan
+            type: http
+            with:
+              url: https://api.shodan.io/shodan/host/{{ steps.extract_alert_fields.output.dest_ip }}?key={{ consts.shodan_api_key }}
+              method: GET
+              headers:
+                Accept: application/json
+            on-failure:
+              continue: true
+          - name: check_ipinfo
+            type: http
+            with:
+              url: https://ipinfo.io/{{ steps.extract_alert_fields.output.dest_ip }}/json?token={{ consts.ipinfo_token }}
+              method: GET
+              headers:
+                Accept: application/json
+            on-failure:
+              continue: true
+          - name: capture_ti_results
+            type: data.set
+            with:
+              abuseipdb_score: "{{ steps.check_abuseipdb.output.data.data.abuseConfidenceScore | default: '0' }}"
+              abuseipdb_reports: "{{ steps.check_abuseipdb.output.data.data.totalReports | default: '0' }}"
+              abuseipdb_country: "{{ steps.check_abuseipdb.output.data.data.countryCode | default: 'unknown' }}"
+              abuseipdb_isp: "{{ steps.check_abuseipdb.output.data.data.isp | default: 'unknown' }}"
+              abuseipdb_usage: "{{ steps.check_abuseipdb.output.data.data.usageType | default: 'unknown' }}"
+              abuseipdb_whitelisted: "{{ steps.check_abuseipdb.output.data.data.isWhitelisted | default: 'false' }}"
+              greynoise_class: "{{ steps.check_greynoise.output.data.classification | default: 'unknown' }}"
+              greynoise_malicious: "{{ steps.check_greynoise.output.data.malicious | default: 'unknown' }}"
+              greynoise_name: "{{ steps.check_greynoise.output.data.name | default: 'n/a' }}"
+              vt_malicious: "{{ steps.check_virustotal.output.data.data.attributes.last_analysis_stats.malicious | default: '0' }}"
+              vt_suspicious: "{{ steps.check_virustotal.output.data.data.attributes.last_analysis_stats.suspicious | default: '0' }}"
+              vt_asn: "{{ steps.check_virustotal.output.data.data.attributes.asn | default: 'unknown' }}"
+              vt_network: "{{ steps.check_virustotal.output.data.data.attributes.network | default: 'unknown' }}"
+              shodan_org: "{{ steps.check_shodan.output.data.org | default: 'unknown' }}"
+              shodan_asn: "{{ steps.check_shodan.output.data.asn | default: 'unknown' }}"
+              shodan_ports: "{{ steps.check_shodan.output.data.ports | join: ', ' | default: 'unknown' }}"
+              shodan_tags: "{{ steps.check_shodan.output.data.tags | join: ', ' | default: 'none' }}"
+              shodan_hostnames: "{{ steps.check_shodan.output.data.hostnames | join: ', ' | default: 'none' }}"
+              ipinfo_hostname: "{{ steps.check_ipinfo.output.data.hostname | default: 'unknown' }}"
+              ipinfo_country: "{{ steps.check_ipinfo.output.data.country | default: 'unknown' }}"
+              ipinfo_org: "{{ steps.check_ipinfo.output.data.org | default: 'unknown' }}"
+              ti_available: "true"
+      - name: set_private_ip_defaults
+        type: if
+        condition: "steps.set_ip_scope.output.is_private : 'true'"
+        steps:
+          - name: capture_ti_results_private
+            type: data.set
+            with:
+              abuseipdb_score: "0"
+              abuseipdb_reports: "0"
+              abuseipdb_country: n/a
+              abuseipdb_isp: n/a
+              abuseipdb_usage: n/a
+              abuseipdb_whitelisted: n/a
+              greynoise_class: n/a
+              greynoise_malicious: n/a
+              greynoise_name: n/a
+              vt_malicious: "0"
+              vt_suspicious: "0"
+              vt_asn: n/a
+              vt_network: n/a
+              shodan_org: n/a
+              shodan_asn: n/a
+              shodan_ports: n/a
+              shodan_tags: n/a
+              shodan_hostnames: n/a
+              ipinfo_hostname: n/a
+              ipinfo_country: n/a
+              ipinfo_org: n/a
+              ti_available: "false"
+      - name: esql_beaconing
+        type: elasticsearch.esql.query
+        with:
+          query: |
+            FROM dest-test
+            | WHERE destination.ip == "{{ steps.extract_alert_fields.output.dest_ip }}"
+            | WHERE source.ip == "{{ steps.extract_alert_fields.output.source_ip }}"
+            | STATS
+                flow_count      = COUNT(*),
+                mean_bytes_out  = AVG(source.bytes),
+                stddev_bytes    = STD_DEV(source.bytes),
+                total_bytes_out = SUM(source.bytes),
+                total_bytes_in  = SUM(destination.packets)
+            | EVAL jitter_cv = CASE(
+                mean_bytes_out > 0,
+                ROUND(stddev_bytes / mean_bytes_out, 4),
+                1.0
+              )
+            | EVAL beacon_verdict = CASE(
+                jitter_cv < 0.05 AND flow_count >= 10, "high",
+                jitter_cv < 0.10 AND flow_count >= 6,  "medium",
+                jitter_cv < 0.20 AND flow_count >= 4,  "low",
+                "none"
+              )
+          format: json
+        on-failure:
+          continue: true
+      - name: esql_peer_scope
+        type: elasticsearch.esql.query
+        with:
+          query: |
+            FROM dest-test
+            | WHERE destination.ip == "{{ steps.extract_alert_fields.output.dest_ip }}"
+            | WHERE CIDR_MATCH(source.ip, "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+            | STATS
+                flow_count      = COUNT(*),
+                total_bytes_out = SUM(source.bytes)
+              BY source.ip
+            | SORT total_bytes_out DESC
+          format: json
+        on-failure:
+          continue: true
+      - name: esql_flow_shape
+        type: elasticsearch.esql.query
+        with:
+          query: |
+            FROM dest-test
+            | WHERE destination.ip == "{{ steps.extract_alert_fields.output.dest_ip }}"
+            | STATS
+                total_bytes_out = SUM(source.bytes),
+                total_bytes_in  = SUM(destination.packets),
+                total_flows     = COUNT(*),
+                distinct_dports = COUNT_DISTINCT(destination.port)
+            | EVAL asymmetry = CASE(
+                total_bytes_in > 0,
+                ROUND(total_bytes_out / total_bytes_in, 2),
+                9999
+              )
+            | EVAL flow_classification = CASE(
+                distinct_dports >= 10,                                                 "port_scan",
+                asymmetry > 20 AND total_bytes_out > 50000,                            "exfiltration",
+                total_bytes_out < 5000 AND total_bytes_in < 5000 AND total_flows >= 6, "beacon_small",
+                "other"
+              )
+          format: json
+        on-failure:
+          continue: true
+      - name: esql_prior_alerts
+        type: elasticsearch.esql.query
+        with:
+          query: |
+            FROM .alerts-security.alerts-default
+            | WHERE @timestamp > NOW() - 90 DAYS
+            | WHERE destination.ip == "{{ steps.extract_alert_fields.output.dest_ip }}"
+            | STATS
+                prior_count = COUNT(*),
+                last_seen   = MAX(@timestamp)
+              BY destination.ip
+          format: json
+        on-failure:
+          continue: true
+      - name: create_case
+        type: cases.createCase
+        with:
+          description: |
+            ## Netflow IP Investigation
+
+            | Field | Value |
+            |-------|-------|
+            | Detection rule | {{ steps.extract_alert_fields.output.rule_name }} |
+            | Destination IP | `{{ steps.extract_alert_fields.output.dest_ip }}` |
+            | Source IP | `{{ steps.extract_alert_fields.output.source_ip }}` |
+            | Alert severity | {{ steps.extract_alert_fields.output.alert_severity }} |
+            | Risk score | {{ steps.extract_alert_fields.output.risk_score }} |
+            | Alert reason | {{ steps.extract_alert_fields.output.alert_reason }} |
+            | Beacon score (rule) | {{ steps.extract_alert_fields.output.beacon_score }} |
+            | Flow count (rule) | {{ steps.extract_alert_fields.output.flow_count }} |
+
+            ---
+
+            ## Threat Intelligence
+            {% if steps.capture_ti_results.output.ti_available == 'false' %}
+            > ⚠️ **Destination IP is RFC1918/private — external TI lookups skipped.**
+            > AbuseIPDB, GreyNoise, VirusTotal, and Shodan do not index private addresses.
+            > This may be east-west lateral movement or internal C2. Focus on ES|QL analysis below.
+            {% endif %}
+
+            **AbuseIPDB**
+            - Confidence: {{ steps.capture_ti_results.output.abuseipdb_score }}%
+            - Reports (90d): {{ steps.capture_ti_results.output.abuseipdb_reports }}
+            - Country: {{ steps.capture_ti_results.output.abuseipdb_country }}
+            - ISP: {{ steps.capture_ti_results.output.abuseipdb_isp }}
+            - Usage type: {{ steps.capture_ti_results.output.abuseipdb_usage }}
+            - Whitelisted: {{ steps.capture_ti_results.output.abuseipdb_whitelisted }}
+
+            **GreyNoise**
+            - Classification: {{ steps.capture_ti_results.output.greynoise_class }}
+            - Malicious: {{ steps.capture_ti_results.output.greynoise_malicious }}
+            - Name/label: {{ steps.capture_ti_results.output.greynoise_name }}
+
+            **VirusTotal**
+            - Malicious engines: {{ steps.capture_ti_results.output.vt_malicious }}
+            - Suspicious: {{ steps.capture_ti_results.output.vt_suspicious }}
+            - ASN: {{ steps.capture_ti_results.output.vt_asn }}
+            - Network: {{ steps.capture_ti_results.output.vt_network }}
+
+            **Shodan**
+            - Org: {{ steps.capture_ti_results.output.shodan_org }}
+            - ASN: {{ steps.capture_ti_results.output.shodan_asn }}
+            - Open ports: {{ steps.capture_ti_results.output.shodan_ports }}
+            - Tags: {{ steps.capture_ti_results.output.shodan_tags }}
+            - Hostnames: {{ steps.capture_ti_results.output.shodan_hostnames }}
+
+            **IPInfo / WHOIS**
+            - Hostname: {{ steps.capture_ti_results.output.ipinfo_hostname }}
+            - Country: {{ steps.capture_ti_results.output.ipinfo_country }}
+            - Org/ASN: {{ steps.capture_ti_results.output.ipinfo_org }}
+
+            ---
+
+            ## Behavioural Analysis (netflow)
+
+            **Beaconing — source→dest pair, last 24h**
+            - Verdict: {{ steps.esql_beaconing.output.values[0][5] | default: "none" }}
+            - Flow count: {{ steps.esql_beaconing.output.values[0][0] | default: "0" }}
+            - Jitter CV (stddev/mean bytes): {{ steps.esql_beaconing.output.values[0][4] | default: "n/a" }}
+            - Total outbound bytes: {{ steps.esql_beaconing.output.values[0][3] | default: "0" }}
+
+            **Flow shape — all flows to this IP, last 24h**
+            - Classification: {{ steps.esql_flow_shape.output.values[0][4] | default: "unknown" }}
+            - Distinct dest ports: {{ steps.esql_flow_shape.output.values[0][3] | default: "0" }}
+            - Outbound bytes: {{ steps.esql_flow_shape.output.values[0][0] | default: "0" }}
+            - Inbound bytes: {{ steps.esql_flow_shape.output.values[0][1] | default: "0" }}
+
+            **Peer scope — internal hosts contacting this IP, last 7 days**
+            - Distinct internal sources: {{ steps.esql_peer_scope.output.values | size }}
+
+            **Prior SIEM alerts — last 90 days**
+            - Prior alert count: {{ steps.esql_prior_alerts.output.values[0][0] | default: "0" }}
+            - Last seen: {{ steps.esql_prior_alerts.output.values[0][1] | default: "never" }}
+
+            ---
+            *Run `Netflow IP Investigation - Stage 2 AI Dossier` with case_id above for AI analysis.*
+          owner: securitySolution
+          tags:
+            - netflow
+            - ip-investigation
+            - "{{ steps.extract_alert_fields.output.rule_name }}"
+          title: "[Netflow] IP Investigation — {{ steps.extract_alert_fields.output.dest_ip }}"
+        on-failure:
+          continue: true
+        push-case: false
+      - name: attach_alert
+        type: cases.addAlerts
+        with:
+          case_id: "{{ steps.create_case.output.case.id }}"
+          alerts:
+            - alertId: "{{ steps.extract_alert_fields.output.alert_id }}"
+              index: .alerts-security.alerts-default
+        on-failure:
+          continue: true
+        push-case: false
+      - name: check_slack_notify
+        type: if
+        condition: |
+          steps.capture_ti_results.output.ti_available : 'true' AND steps.capture_ti_results.output.abuseipdb_score >= '50'
+        steps:
+          - name: notify_slack
+            type: http
+            with:
+              url: "{{ consts.slack_webhook }}"
+              method: POST
+              body: |
+                {
+                  "blocks": [
+                    {
+                      "type": "header",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "⚠️ Elevated AbuseIPDB: {{ steps.extract_alert_fields.output.dest_ip }}",
+                        "emoji": true
+                      }
+                    },
+                    {
+                      "type": "section",
+                      "fields": [
+                        { "type": "mrkdwn", "text": "*Rule:* {{ steps.extract_alert_fields.output.rule_name }}" },
+                        { "type": "mrkdwn", "text": "*Source IP:* `{{ steps.extract_alert_fields.output.source_ip }}`" },
+                        { "type": "mrkdwn", "text": "*AbuseIPDB:* {{ steps.capture_ti_results.output.abuseipdb_score }}%" },
+                        { "type": "mrkdwn", "text": "*GreyNoise:* {{ steps.capture_ti_results.output.greynoise_class }}" },
+                        { "type": "mrkdwn", "text": "*VT malicious:* {{ steps.capture_ti_results.output.vt_malicious }}" },
+                        { "type": "mrkdwn", "text": "*Beacon verdict:* {{ steps.esql_beaconing.output.values[0][5] | default: 'none' }}" }
+                      ]
+                    },
+                    {
+                      "type": "section",
+                      "text": {
+                        "type": "mrkdwn",
+                        "text": "<{{ consts.kibana_url }}/app/security/cases/{{ steps.create_case.output.id }}|View case in Kibana>"
+                      }
+                    }
+                  ]
+                }
+              headers:
+                content-type: application/json
+            on-failure:
+              continue: true
+      - name: trigger_stage2
+        type: workflow.executeAsync
+        with:
+          workflow-id: netflow-ip-investigation-stage-2-ai-dossier
+          inputs:
+            case_id: "{{ steps.create_case.output.case.id }}"
+            dest_ip: "{{ steps.extract_alert_fields.output.dest_ip }}"
+            source_ip: "{{ steps.extract_alert_fields.output.source_ip }}"
+            rule_name: "{{ steps.extract_alert_fields.output.rule_name }}"
+            abuseipdb_score: "{{ steps.capture_ti_results.output.abuseipdb_score | default: '0' }}"
+            greynoise_class: "{{ steps.capture_ti_results.output.greynoise_class | default: 'n/a' }}"
+            vt_malicious: "{{ steps.capture_ti_results.output.vt_malicious | default: '0' }}"
+            shodan_org: "{{ steps.capture_ti_results.output.shodan_org | default: 'n/a' }}"
+            shodan_ports: "{{ steps.capture_ti_results.output.shodan_ports | default: 'n/a' }}"
+            country: "{{ steps.capture_ti_results.output.ipinfo_country | default: 'unknown' }}"
+            beacon_verdict: "{{ steps.esql_beaconing.output.values[0][5] | default: 'none' }}"
+            flow_count: "{{ steps.esql_beaconing.output.values[0][0] | default: '0' }}"
+            jitter_cv: "{{ steps.esql_beaconing.output.values[0][4] | default: '1.0' }}"
+            flow_classification: "{{ steps.esql_flow_shape.output.values[0][4] | default: 'other' }}"
+            peer_host_count: "{{ steps.esql_peer_scope.output.values | size }}"
+      - name: log_alert_complete
+        type: console
+        with:
+          message: |
+            ✓ Alert {{ foreach.index | plus: 1 }}/{{ foreach.total }} complete
+            IP: {{ steps.extract_alert_fields.output.dest_ip }} (TI available: {{ steps.capture_ti_results.output.ti_available }})
+            Case ID: {{ steps.create_case.output.id }}
+            AbuseIPDB: {{ steps.capture_ti_results.output.abuseipdb_score }}%
+            GreyNoise: {{ steps.capture_ti_results.output.greynoise_class }}
+            VT malicious: {{ steps.capture_ti_results.output.vt_malicious }}
+            Beacon verdict: {{ steps.esql_beaconing.output.values[0][5] | default: 'none' }}
+            Flow shape: {{ steps.esql_flow_shape.output.values[0][4] | default: 'unknown' }}
+            Peer hosts (7d): {{ steps.esql_peer_scope.output.values | size }}
+            ---
+            For Stage 2 AI dossier: case_id={{ steps.create_case.output.id }}, dest_ip={{ steps.extract_alert_fields.output.dest_ip }}
+  - name: log_batch_complete
+    type: console
+    with:
+      message: |
+        Stage 1 complete. Processed {{ event.alerts | size }} alert(s).
+        Rule: {{ event.rule.name }}

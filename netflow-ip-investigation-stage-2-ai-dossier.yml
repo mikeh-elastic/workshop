@@ -1,0 +1,346 @@
+version: "1"
+name: Netflow IP Investigation - Stage 2 AI Dossier
+description: |
+  Manual workflow that takes Stage 1 enrichment outputs, runs ai.prompt to synthesise a full narrative dossier and ai.summarize for a compact Slack message, then appends both to the specified Kibana security case. Also runs a live ES|QL flow context query to provide up-to-date behavioural data.
+enabled: true
+tags:
+  - netflow
+  - ai-dossier
+  - ip-investigation
+  - security
+consts:
+  kibana_url: https://YOUR-KIBANA-URL.elastic-cloud.com
+  kibana_auth: ApiKey YOUR-API-KEY-HERE
+  llm_connector: Anthropic-Claude-Opus-4-6
+  slack_webhook: https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK
+triggers:
+  - type: manual
+inputs:
+  properties:
+    case_id:
+      type: string
+      description: Kibana case ID from Stage 1 (e.g. 550e8400-e29b-41d4-a716-446655440000)
+    dest_ip:
+      type: string
+      description: Destination IP under investigation (e.g. 185.220.101.47)
+    source_ip:
+      type: string
+      description: Internal source IP that triggered the alert
+      default: unknown
+    rule_name:
+      type: string
+      description: Detection rule name that fired
+      default: Netflow detection rule
+    abuseipdb_score:
+      type: string
+      description: AbuseIPDB confidence score (0-100)
+      default: "0"
+    greynoise_class:
+      type: string
+      description: GreyNoise classification (malicious/benign/unknown)
+      default: unknown
+    vt_malicious:
+      type: string
+      description: VirusTotal malicious engine count
+      default: "0"
+    shodan_org:
+      type: string
+      description: Shodan organisation
+      default: unknown
+    shodan_ports:
+      type: string
+      description: Comma-separated open ports from Shodan
+      default: unknown
+    country:
+      type: string
+      description: Country code from IPInfo
+      default: unknown
+    beacon_verdict:
+      type: string
+      description: Beaconing verdict (high/medium/low/none)
+      default: none
+    flow_count:
+      type: string
+      description: Flow count from beaconing analysis
+      default: "0"
+    jitter_cv:
+      type: string
+      description: Jitter coefficient of variation (lower = more regular)
+      default: "1.0"
+    flow_classification:
+      type: string
+      description: Flow shape (port_scan/exfiltration/beacon_small/other)
+      default: other
+    peer_host_count:
+      type: string
+      description: Number of internal hosts contacting this IP in last 7d
+      default: "1"
+  required:
+    - case_id
+    - dest_ip
+steps:
+  - name: log_start
+    type: console
+    with:
+      message: |
+        Stage 2 AI Dossier — starting
+        Case ID: {{ inputs.case_id }}
+        IP: {{ inputs.dest_ip }}
+        Rule: {{ inputs.rule_name }}
+        AbuseIPDB: {{ inputs.abuseipdb_score }}%  GreyNoise: {{ inputs.greynoise_class }}  VT: {{ inputs.vt_malicious }}
+        Beacon: {{ inputs.beacon_verdict }} ({{ inputs.flow_count }} flows, jitter={{ inputs.jitter_cv }})
+        Flow shape: {{ inputs.flow_classification }}  Peers: {{ inputs.peer_host_count }}
+  - name: get_live_flow_context
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM dest-test
+        | WHERE @timestamp > NOW() - 24 HOURS
+        | WHERE destination.ip == "{{ inputs.dest_ip }}"
+        | STATS
+            flow_count       = COUNT(*),
+            total_bytes_out  = SUM(source.bytes),
+            total_bytes_in   = SUM(destination.packets),
+            distinct_ports   = COUNT_DISTINCT(destination.port),
+            distinct_sources = COUNT_DISTINCT(source.ip)
+        | EVAL asymmetry = CASE(
+            total_bytes_in > 0,
+            ROUND(total_bytes_out / total_bytes_in, 2),
+            9999
+          )
+      format: json
+    on-failure:
+      continue: true
+  - name: build_context
+    type: data.set
+    with:
+      dest_ip: "{{ inputs.dest_ip }}"
+      source_ip: "{{ inputs.source_ip }}"
+      rule_name: "{{ inputs.rule_name }}"
+      country: "{{ inputs.country }}"
+      shodan_org: "{{ inputs.shodan_org }}"
+      shodan_ports: "{{ inputs.shodan_ports }}"
+      abuseipdb_score: "{{ inputs.abuseipdb_score }}"
+      greynoise_class: "{{ inputs.greynoise_class }}"
+      vt_malicious: "{{ inputs.vt_malicious }}"
+      beacon_verdict: "{{ inputs.beacon_verdict }}"
+      flow_count: "{{ inputs.flow_count }}"
+      jitter_cv: "{{ inputs.jitter_cv }}"
+      flow_classification: "{{ inputs.flow_classification }}"
+      peer_host_count: "{{ inputs.peer_host_count }}"
+      live_flows: "{{ steps.get_live_flow_context.output.values[0][0] | default: '0' }}"
+      live_bytes_out: "{{ steps.get_live_flow_context.output.values[0][1] | default: '0' }}"
+      live_bytes_in: "{{ steps.get_live_flow_context.output.values[0][2] | default: '0' }}"
+      live_ports: "{{ steps.get_live_flow_context.output.values[0][3] | default: '0' }}"
+      live_sources: "{{ steps.get_live_flow_context.output.values[0][4] | default: '0' }}"
+      live_asymmetry: "{{ steps.get_live_flow_context.output.values[0][5] | default: 'n/a' }}"
+  - name: generate_dossier
+    type: ai.prompt
+    with:
+      prompt: |
+        You are a senior threat intelligence analyst specialising in network forensics.
+        Produce a structured investigation dossier for the IP address below.
+        Write in markdown. Be direct and reference specific values. Flag contradictions.
+
+        ## IP Under Investigation
+        - Destination IP: {{ steps.build_context.output.dest_ip }}
+        - Internal source: {{ steps.build_context.output.source_ip }}
+        - Detection rule: {{ steps.build_context.output.rule_name }}
+        - Country: {{ steps.build_context.output.country }}
+        - ASN/Org: {{ steps.build_context.output.shodan_org }}
+        - Open ports (Shodan): {{ steps.build_context.output.shodan_ports }}
+
+        ## Threat Intelligence Results
+        - AbuseIPDB confidence: {{ steps.build_context.output.abuseipdb_score }}%
+        - GreyNoise: {{ steps.build_context.output.greynoise_class }}
+        - VirusTotal malicious engines: {{ steps.build_context.output.vt_malicious }}
+
+        ## Behavioural Analysis (netflow)
+        - Beacon verdict: {{ steps.build_context.output.beacon_verdict }}
+        - Flow count (24h): {{ steps.build_context.output.flow_count }}
+        - Byte-size jitter CV: {{ steps.build_context.output.jitter_cv }} (under 0.05 = near-deterministic beacon)
+        - Flow classification: {{ steps.build_context.output.flow_classification }}
+        - Internal peers (7d): {{ steps.build_context.output.peer_host_count }}
+
+        ## Live Flow Context (last 24h at dossier time)
+        - Total flows: {{ steps.build_context.output.live_flows }}
+        - Outbound bytes: {{ steps.build_context.output.live_bytes_out }}
+        - Inbound bytes: {{ steps.build_context.output.live_bytes_in }}
+        - Distinct dest ports: {{ steps.build_context.output.live_ports }}
+        - Distinct internal sources: {{ steps.build_context.output.live_sources }}
+        - Byte asymmetry: {{ steps.build_context.output.live_asymmetry }}
+
+        ## Required Sections
+        Use exactly these markdown headers:
+
+        ### 🤖 AI Dossier — {{ steps.build_context.output.dest_ip }}
+
+        #### Executive Summary
+        2-3 plain-language sentences for a SOC manager.
+
+        #### Threat Assessment
+        - **Verdict:** malicious / suspicious / likely_benign / unknown
+        - **Confidence:** high / medium / low
+        - **Primary threat type:** c2_beacon / port_scan / exfiltration / scanner / tor_exit / unknown
+        - **MITRE ATT&CK:** list T-codes with names
+        - **Novel pattern:** yes/no — flag yes if signals are ambiguous or contradictory
+
+        #### Evidence Chain
+        | Signal | Observed Value | Significance |
+        |--------|---------------|--------------|
+        (one row per key signal; skip signals with no data)
+
+        #### Peer Impact
+        - Affected internal hosts: {{ steps.build_context.output.peer_host_count }}
+        - Blast radius: contained / limited / broad
+        - Investigation priority: immediate / standard / monitor
+
+        #### Analyst Recommendations
+        3-5 specific, actionable items. Name exact queries to run or systems to check.
+        Do not write generic advice.
+
+        #### Suggested Follow-on ES|QL Queries
+        1-2 queries as esql code blocks.
+
+        #### Block Recommendation
+        - Recommend block: yes / no
+        - Rationale: one specific sentence.
+    on-failure:
+      continue: true
+    connector-id: Anthropic-Claude-Opus-4-6
+  - name: summarize_for_slack
+    type: ai.summarize
+    with:
+      input: "{{ steps.generate_dossier.output.content }}"
+    on-failure:
+      continue: true
+    connector-id: Anthropic-Claude-Opus-4-6
+  - name: append_dossier
+    type: cases.addComment
+    with:
+      case_id: "{{ inputs.case_id }}"
+      comment: "{{ steps.generate_dossier.output.content | default: '⚠️ AI dossier generation failed — check execution log and retry.' }}"
+    on-failure:
+      retry:
+        max-attempts: 2
+        delay: 3s
+      continue: true
+    push-case: false
+  - name: append_flow_context
+    type: cases.addComment
+    with:
+      case_id: "{{ inputs.case_id }}"
+      comment: |
+        ## Live Flow Context (ES|QL — last 24h at dossier time)
+
+        | Metric | Value |
+        |--------|-------|
+        | Flow count | {{ steps.build_context.output.live_flows }} |
+        | Outbound bytes | {{ steps.build_context.output.live_bytes_out }} |
+        | Inbound bytes | {{ steps.build_context.output.live_bytes_in }} |
+        | Distinct dest ports | {{ steps.build_context.output.live_ports }} |
+        | Distinct internal sources | {{ steps.build_context.output.live_sources }} |
+        | Byte asymmetry ratio | {{ steps.build_context.output.live_asymmetry }} |
+
+        *Query run at workflow execution time. Re-run Stage 2 for updated values.*
+    on-failure:
+      continue: true
+    push-case: false
+  - name: check_high_beacon
+    type: if
+    condition: "inputs.beacon_verdict : 'high'"
+    steps:
+      - name: wait_for_review
+        type: waitForInput
+        with:
+          message: |
+            High-confidence beacon detected to {{ inputs.dest_ip }}.
+
+            AbuseIPDB: {{ inputs.abuseipdb_score }}% | GreyNoise: {{ inputs.greynoise_class }} | VT malicious: {{ inputs.vt_malicious }}
+            Flow count: {{ inputs.flow_count }} | Jitter CV: {{ inputs.jitter_cv }}
+
+            Review the AI dossier in case {{ inputs.case_id }} then confirm your decision.
+          schema:
+            type: object
+            properties:
+              decision:
+                type: string
+                title: Decision
+                enum:
+                  - Confirmed malicious — add to blocklist
+                  - Suspicious — continue monitoring
+                  - False positive — close case
+              notes:
+                type: string
+                title: Analyst notes
+            required:
+              - decision
+      - name: append_decision
+        type: cases.addComment
+        with:
+          case_id: "{{ inputs.case_id }}"
+          comment: |
+            ## ✅ Analyst Decision
+
+            **Decision:** {{ steps.wait_for_review.output.decision }}
+            **Notes:** {{ steps.wait_for_review.output.notes | default: "(none)" }}
+            **Execution ID:** {{ execution.id }}
+        on-failure:
+          continue: true
+        push-case: false
+  - name: notify_slack
+    type: http
+    with:
+      url: "{{ consts.slack_webhook }}"
+      method: POST
+      body: |
+        {
+          "blocks": [
+            {
+              "type": "header",
+              "text": {
+                "type": "plain_text",
+                "text": "📋 AI Dossier Ready: {{ inputs.dest_ip }}",
+                "emoji": true
+              }
+            },
+            {
+              "type": "section",
+              "text": {
+                "type": "mrkdwn",
+                "text": "{{ steps.summarize_for_slack.output.content | default: 'Summary unavailable — see case for full dossier.' }}"
+              }
+            },
+            {
+              "type": "context",
+              "elements": [
+                {
+                  "type": "mrkdwn",
+                  "text": "AbuseIPDB={{ inputs.abuseipdb_score }}% | GreyNoise={{ inputs.greynoise_class }} | VT={{ inputs.vt_malicious }} | Beacon={{ inputs.beacon_verdict }}"
+                }
+              ]
+            },
+            {
+              "type": "actions",
+              "elements": [
+                {
+                  "type": "button",
+                  "text": { "type": "plain_text", "text": "📁 View Case", "emoji": true },
+                  "style": "primary",
+                  "url": "{{ consts.kibana_url }}/app/security/cases/{{ inputs.case_id }}"
+                }
+              ]
+            }
+          ]
+        }
+      headers:
+        content-type: application/json
+    on-failure:
+      continue: true
+  - name: log_complete
+    type: console
+    with:
+      message: |
+        Stage 2 complete.
+        Case {{ inputs.case_id }} updated with AI dossier, flow context, and Slack notification.
+        View: {{ consts.kibana_url }}/app/security/cases/{{ inputs.case_id }}

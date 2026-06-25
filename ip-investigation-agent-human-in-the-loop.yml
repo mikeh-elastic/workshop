@@ -1,0 +1,456 @@
+version: "1"
+name: IP Investigation — Agent + Human in the Loop
+description: |
+  Demonstrates all three HITL positions: a pre-approval gate before the agent runs, the ai.agent investigation step, and a post-approval gate before any action is taken. Designed as a workshop exercise showing how waitForInput integrates with ai.agent in both directions.
+enabled: true
+tags:
+  - netflow
+  - hitl
+  - agent
+  - workshop
+  - layer3
+consts:
+  kibana_url: https://YOUR-KIBANA-URL.elastic-cloud.com
+  llm_connector_id: YOUR-LLM-CONNECTOR-ID
+triggers:
+  - type: manual
+inputs:
+  properties:
+    dest_ip:
+      type: string
+      description: Destination IP to investigate
+    source_ip:
+      type: string
+      description: Internal source IP (optional)
+      default: unknown
+    context:
+      type: string
+      description: Any background context for this investigation
+      default: Manual investigation request
+    skip_pre_approval:
+      type: string
+      description: Set to 'true' to skip Gate 1 and run the agent immediately
+      default: "false"
+    abuseipdb_score:
+      type: string
+      description: AbuseIPDB score from Stage 1 enrichment (0-100), if available
+      default: "0"
+    beacon_verdict:
+      type: string
+      description: Beaconing verdict from Stage 1 (high/medium/low/none), if available
+      default: none
+    greynoise_class:
+      type: string
+      description: GreyNoise classification from Stage 1, if available
+      default: unknown
+  required:
+    - dest_ip
+steps:
+  - name: log_start
+    type: console
+    with:
+      message: |
+        Agent + HITL investigation starting
+        IP: {{ inputs.dest_ip }}
+        Source: {{ inputs.source_ip }}
+        Context: {{ inputs.context }}
+        AbuseIPDB score: {{ inputs.abuseipdb_score }}
+        Beacon verdict: {{ inputs.beacon_verdict }}
+        Skip pre-approval: {{ inputs.skip_pre_approval }}
+  - name: review
+    type: waitForInput
+    with:
+      message: |
+        Approve investigation on IP: {{ inputs.dest_ip }}
+        Source: {{ inputs.source_ip }}
+      schema:
+        type: object
+        properties:
+          approved:
+            type: boolean
+            title: Approve investigation?
+          notes:
+            type: string
+            title: Analyst notes
+        required:
+          - approved
+  - name: gate1_pre_approval
+    type: if
+    condition: "inputs.skip_pre_approval : 'false'"
+    steps:
+      - name: pre_approval_wait
+        type: waitForInput
+        with:
+          message: |
+            ## Investigation Request — Gate 1 of 2
+
+            An investigation has been requested for IP `{{ inputs.dest_ip }}`.
+
+            **Context:** {{ inputs.context }}
+            **Source IP:** {{ inputs.source_ip }}
+
+            **Available pre-enrichment:**
+            - AbuseIPDB score: {{ inputs.abuseipdb_score }}%
+            - Beacon verdict: {{ inputs.beacon_verdict }}
+            - GreyNoise: {{ inputs.greynoise_class }}
+
+            **Decision:** Should the AI investigator agent run a full analysis on this IP?
+
+            Approving will invoke the agent, which will query netflow data,
+            reason over all signals, and propose a recommended action.
+          schema:
+            type: object
+            properties:
+              approved:
+                type: boolean
+                title: Run AI investigation
+              priority:
+                type: string
+                title: Priority
+                enum:
+                  - standard
+                  - urgent
+                  - low
+              notes:
+                type: string
+                title: Analyst notes (optional)
+            required:
+              - approved
+      - name: log_gate1_decision
+        type: console
+        with:
+          message: |
+            Gate 1 decision: approved={{ steps.pre_approval_wait.output.approved }}
+            Priority: {{ steps.pre_approval_wait.output.priority | default: 'standard' }}
+            Notes: {{ steps.pre_approval_wait.output.notes | default: '(none)' }}
+      - name: handle_gate1_rejection
+        type: if
+        condition: "steps.pre_approval_wait.output.approved : false"
+        steps:
+          - name: create_rejected_case
+            type: cases.createCase
+            with:
+              description: |
+                ## Investigation Declined at Gate 1
+
+                **IP:** `{{ inputs.dest_ip }}`
+                **Declined by analyst at:** workflow execution
+                **Analyst notes:** {{ steps.pre_approval_wait.output.notes | default: '(none)' }}
+
+                No AI investigation was run. Case created for audit trail.
+              owner: securitySolution
+              tags:
+                - netflow
+                - hitl
+                - gate1-declined
+              title: "[Investigation Declined] {{ inputs.dest_ip }}"
+            push-case: false
+  - name: run_agent_investigation
+    type: if
+    condition: |
+      inputs.skip_pre_approval : 'true' OR steps.pre_approval_wait.output.approved : true
+    steps:
+      - name: agent_investigate
+        type: ai.agent
+        with:
+          schema:
+            type: object
+            properties:
+              verdict:
+                type: string
+              confidence:
+                type: string
+              key_findings:
+                type: array
+                items:
+                  type: string
+              recommended_action:
+                type: string
+              rationale:
+                type: string
+            required:
+              - verdict
+              - recommended_action
+          message: |
+            Investigate the following IP address and produce a structured analysis.
+
+            ## IP Under Investigation
+            - Destination IP: {{ inputs.dest_ip }}
+            - Internal source: {{ inputs.source_ip }}
+            - Context: {{ inputs.context }}
+
+            ## Pre-enrichment available
+            - AbuseIPDB confidence: {{ inputs.abuseipdb_score }}%
+            - Beacon verdict: {{ inputs.beacon_verdict }}
+            - GreyNoise: {{ inputs.greynoise_class }}
+
+            Use your available tools to:
+            1. Check how many internal hosts have communicated with this IP in the last 7 days
+            2. Check for prior SIEM alerts on this IP in the last 90 days
+            3. Assess the beaconing behaviour if source_ip is known
+
+            Return a concise assessment with:
+            - verdict (malicious/suspicious/likely_benign/unknown)
+            - confidence (high/medium/low)
+            - key findings (bullet list)
+            - recommended_action (one of: block, monitor, escalate, close)
+            - rationale for the recommended action
+        agent-id: YOUR-AGENT-BUILDER-AGENT-ID
+        connector-id: "{{ consts.llm_connector_id }}"
+      - name: capture_agent_output
+        type: data.set
+        with:
+          verdict: "{{ steps.capture_agent_output.output.verdict | default: 'unknown' }}"
+          confidence: "{{ steps.capture_agent_output.output.confidence | default: 'low' }}"
+          recommended_action: "{{ steps.capture_agent_output.output.recommended_action | default: 'monitor' }}"
+          rationale: "{{ steps.capture_agent_output.output.rationale | default: 'No rationale provided' }}"
+          key_findings: "{{ steps.capture_agent_output.output.key_findings | join: ', ' | default: 'No findings returned' }}"
+      - name: log_agent_output
+        type: console
+        with:
+          message: |
+            Agent investigation complete
+            Verdict: {{ steps.capture_agent_output.output.verdict }}
+            Confidence: {{ steps.capture_agent_output.output.confidence }}
+            Recommended action: {{ steps.capture_agent_output.output.recommended_action }}
+            Rationale: {{ steps.capture_agent_output.output.rationale }}
+      - name: gate2_post_approval
+        type: waitForInput
+        with:
+          message: |
+            ## Investigation Complete — Gate 2 of 2
+
+            The AI investigator has analysed `{{ inputs.dest_ip }}`.
+
+            ---
+
+            **Verdict:** {{ steps.capture_agent_output.output.verdict }}
+            **Confidence:** {{ steps.capture_agent_output.output.confidence }}
+
+            **Key findings:**
+            {{ steps.capture_agent_output.output.key_findings }}
+
+            **Agent recommendation:** {{ steps.capture_agent_output.output.recommended_action }}
+            **Rationale:** {{ steps.capture_agent_output.output.rationale }}
+
+            ---
+
+            **What action should be taken?**
+            You can accept the agent's recommendation, override it, or request more investigation.
+          schema:
+            type: object
+            properties:
+              approved:
+                type: boolean
+                title: Accept agent recommendation
+              override_action:
+                type: string
+                title: Override action (if not accepting recommendation)
+                enum:
+                  - ""
+                  - block
+                  - monitor
+                  - escalate
+                  - close
+                  - investigate_further
+              analyst_notes:
+                type: string
+                title: Analyst notes
+            required:
+              - approved
+      - name: log_gate2_decision
+        type: console
+        with:
+          message: |
+            Gate 2 decision: approved={{ steps.gate2_post_approval.output.approved }}
+            Override: {{ steps.gate2_post_approval.output.override_action | default: 'none' }}
+            Notes: {{ steps.gate2_post_approval.output.analyst_notes | default: '(none)' }}
+      - name: dispatch_action
+        type: switch
+        expression: "{{ steps.gate2_post_approval.output.approved }}"
+        cases:
+          - match: "true"
+            steps:
+              - name: dispatch_accepted
+                type: switch
+                expression: "{{ steps.capture_agent_output.output.recommended_action }}"
+                cases:
+                  - match: block
+                    steps:
+                      - name: create_block_case
+                        type: cases.createCase
+                        with:
+                          description: |
+                            ## Block Action Approved
+
+                            **IP:** `{{ inputs.dest_ip }}`
+                            **Verdict:** {{ steps.capture_agent_output.output.verdict }} ({{ steps.capture_agent_output.output.confidence }})
+                            **Decided by:** analyst accepted agent recommendation
+                            **Analyst notes:** {{ steps.gate2_post_approval.output.analyst_notes | default: '(none)' }}
+
+                            **Agent findings:** {{ steps.capture_agent_output.output.key_findings }}
+
+                            **Action required:** Add `{{ inputs.dest_ip }}` to blocklist manually per policy.
+                          owner: securitySolution
+                          tags:
+                            - netflow
+                            - block-approved
+                            - hitl
+                          title: "[BLOCK APPROVED] {{ inputs.dest_ip }}"
+                        push-case: false
+                  - match: escalate
+                    steps:
+                      - name: create_escalated_case
+                        type: cases.createCase
+                        with:
+                          description: |
+                            ## Escalated — Agent Recommendation Accepted
+
+                            **IP:** `{{ inputs.dest_ip }}`
+                            **Verdict:** {{ steps.capture_agent_output.output.verdict }} ({{ steps.capture_agent_output.output.confidence }})
+                            **Decided by:** analyst accepted agent recommendation
+                            **Analyst notes:** {{ steps.gate2_post_approval.output.analyst_notes | default: '(none)' }}
+
+                            **Agent findings:** {{ steps.capture_agent_output.output.key_findings }}
+                            **Rationale:** {{ steps.capture_agent_output.output.rationale }}
+                          owner: securitySolution
+                          tags:
+                            - netflow
+                            - escalated
+                            - hitl
+                          title: "[ESCALATED] IP Investigation — {{ inputs.dest_ip }}"
+                        push-case: false
+                  - match: investigate_further
+                    steps:
+                      - name: create_followup_case
+                        type: cases.createCase
+                        with:
+                          description: |
+                            ## Further Investigation Required
+
+                            **IP:** `{{ inputs.dest_ip }}`
+                            **Verdict:** {{ steps.capture_agent_output.output.verdict }}
+                            **Action:** investigate_further (agent accepted)
+                            **Analyst notes:** {{ steps.gate2_post_approval.output.analyst_notes | default: '(none)' }}
+                          owner: securitySolution
+                          tags:
+                            - netflow
+                            - needs-investigation
+                            - hitl
+                          title: "[FURTHER INVESTIGATION] {{ inputs.dest_ip }}"
+                        push-case: false
+                default:
+                  - name: create_monitor_accepted_case
+                    type: cases.createCase
+                    with:
+                      description: |
+                        ## Monitor — Agent Recommendation Accepted
+
+                        **IP:** `{{ inputs.dest_ip }}`
+                        **Verdict:** {{ steps.capture_agent_output.output.verdict }}
+                        **Action:** {{ steps.capture_agent_output.output.recommended_action }}
+                        **Analyst notes:** {{ steps.gate2_post_approval.output.analyst_notes | default: '(none)' }}
+
+                        **Agent findings:** {{ steps.capture_agent_output.output.key_findings }}
+                      owner: securitySolution
+                      tags:
+                        - netflow
+                        - hitl
+                        - monitor
+                      title: "[MONITOR] {{ inputs.dest_ip }}"
+                    push-case: false
+        default:
+          - name: dispatch_override
+            type: switch
+            expression: "{{ steps.gate2_post_approval.output.override_action | default: 'monitor' }}"
+            cases:
+              - match: block
+                steps:
+                  - name: create_block_override_case
+                    type: cases.createCase
+                    with:
+                      description: |
+                        ## Block — Analyst Override
+
+                        **IP:** `{{ inputs.dest_ip }}`
+                        **Agent recommended:** {{ steps.capture_agent_output.output.recommended_action }}
+                        **Override:** block
+                        **Analyst notes:** {{ steps.gate2_post_approval.output.analyst_notes | default: '(none)' }}
+
+                        **Action required:** Add `{{ inputs.dest_ip }}` to blocklist manually per policy.
+                      owner: securitySolution
+                      tags:
+                        - netflow
+                        - block-approved
+                        - analyst-override
+                        - hitl
+                      title: "[BLOCK — ANALYST OVERRIDE] {{ inputs.dest_ip }}"
+                    push-case: false
+              - match: escalate
+                steps:
+                  - name: create_escalated_override_case
+                    type: cases.createCase
+                    with:
+                      description: |
+                        ## Escalated — Analyst Override
+
+                        **IP:** `{{ inputs.dest_ip }}`
+                        **Agent recommended:** {{ steps.capture_agent_output.output.recommended_action }}
+                        **Override:** escalate
+                        **Analyst notes:** {{ steps.gate2_post_approval.output.analyst_notes | default: '(none)' }}
+                      owner: securitySolution
+                      tags:
+                        - netflow
+                        - escalated
+                        - analyst-override
+                        - hitl
+                      title: "[ESCALATED — ANALYST OVERRIDE] {{ inputs.dest_ip }}"
+                    push-case: false
+              - match: investigate_further
+                steps:
+                  - name: create_followup_override_case
+                    type: cases.createCase
+                    with:
+                      description: |
+                        ## Further Investigation Required — Analyst Override
+
+                        **IP:** `{{ inputs.dest_ip }}`
+                        **Agent recommended:** {{ steps.capture_agent_output.output.recommended_action }}
+                        **Override:** investigate_further
+                        **Analyst notes:** {{ steps.gate2_post_approval.output.analyst_notes | default: '(none)' }}
+                      owner: securitySolution
+                      tags:
+                        - netflow
+                        - needs-investigation
+                        - analyst-override
+                        - hitl
+                      title: "[FURTHER INVESTIGATION — OVERRIDE] {{ inputs.dest_ip }}"
+                    push-case: false
+            default:
+              - name: create_monitor_override_case
+                type: cases.createCase
+                with:
+                  description: |
+                    ## Monitor — Analyst Override
+
+                    **IP:** `{{ inputs.dest_ip }}`
+                    **Agent recommended:** {{ steps.capture_agent_output.output.recommended_action }}
+                    **Override:** {{ steps.gate2_post_approval.output.override_action | default: 'monitor' }}
+                    **Analyst notes:** {{ steps.gate2_post_approval.output.analyst_notes | default: '(none)' }}
+                  owner: securitySolution
+                  tags:
+                    - netflow
+                    - hitl
+                    - analyst-override
+                  title: "[MONITOR — ANALYST OVERRIDE] {{ inputs.dest_ip }}"
+                push-case: false
+  - name: log_complete
+    type: console
+    with:
+      message: |
+        Workflow complete for {{ inputs.dest_ip }}
+        Review the execution trace in Workflows → Executions to see:
+        - Gate 1 decision (if used)
+        - Agent investigation output
+        - Gate 2 decision
+        - Final action dispatched
