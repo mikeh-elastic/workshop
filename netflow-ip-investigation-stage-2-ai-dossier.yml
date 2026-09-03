@@ -13,6 +13,7 @@ consts:
   kibana_auth: ApiKey YOUR-API-KEY-HERE
   llm_connector: Anthropic-Claude-Opus-4-6
   slack_webhook: https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK
+  dispatch_board_url: https://pads-families-defeat-pubs.trycloudflare.com
 triggers:
   - type: manual
 inputs:
@@ -100,7 +101,7 @@ steps:
         | STATS
             flow_count       = COUNT(*),
             total_bytes_out  = SUM(source.bytes),
-            total_bytes_in   = SUM(destination.packets),
+            total_bytes_in   = SUM(source.bytes_Reverse),
             distinct_ports   = COUNT_DISTINCT(destination.port),
             distinct_sources = COUNT_DISTINCT(source.ip)
         | EVAL asymmetry = CASE(
@@ -288,6 +289,52 @@ steps:
         on-failure:
           continue: true
         push-case: false
+  - name: resolve_dispatch_severity
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        ROW
+          beacon = "{{ inputs.beacon_verdict }}",
+          gnoise = "{{ inputs.greynoise_class }}",
+          abipdb = "{{ inputs.abuseipdb_score }}"
+        | EVAL severity = CASE(
+            beacon == "high" OR gnoise == "malicious", "critical",
+            beacon == "medium" OR abipdb >= "40",      "high",
+            beacon == "low"    OR abipdb >= "10",      "medium",
+            "low"
+          )
+        | KEEP severity
+      format: json
+    on-failure:
+      continue: true
+  - name: post_to_dispatch_board
+    type: http
+    with:
+      url: "{{ consts.dispatch_board_url }}/webhook"
+      method: POST
+      headers:
+        content-type: application/json
+      body:
+        dest_ip: "{{ inputs.dest_ip }}"
+        source_ip: "{{ inputs.source_ip }}"
+        alert_type: "{{ inputs.rule_name }}"
+        severity: "{{ steps.resolve_dispatch_severity.output.values[0][0] | default: 'medium' }}"
+        analyst: "workflow-auto"
+        ti_score: "{{ inputs.abuseipdb_score }}"
+        greynoise_class: "{{ inputs.greynoise_class }}"
+        beacon_verdict: "{{ inputs.beacon_verdict }}"
+        shodan_org: "{{ inputs.shodan_org }}"
+        host_identity: "{{ inputs.shodan_org }}"
+        metric_name: "flow_count"
+        metric_value: "{{ inputs.flow_count }}"
+        metric_unit: "flows"
+        case_id: "{{ inputs.case_id }}"
+        dossier_summary: "{{ steps.summarize_for_slack.output.content | default: 'Dossier in Kibana case.' }}"
+        recommended_action: "See Kibana case {{ inputs.case_id }} for full analysis."
+        weather_note: "{{ inputs.rule_name }} | jitter={{ inputs.jitter_cv }} | peers={{ inputs.peer_host_count }}"
+        workflow_run_id: "{{ execution.id }}"
+    on-failure:
+      continue: true
   - name: notify_slack
     type: http
     with:
@@ -342,5 +389,5 @@ steps:
     with:
       message: |
         Stage 2 complete.
-        Case {{ inputs.case_id }} updated with AI dossier, flow context, and Slack notification.
+        Case {{ inputs.case_id }} updated with AI dossier, flow context, dispatch board, and Slack.
         View: {{ consts.kibana_url }}/app/security/cases/{{ inputs.case_id }}
